@@ -13,7 +13,7 @@
  *   MCP_SECRET           – a random secret string to protect this endpoint
  */
 
-import { ConfidentialClientApplication } = require("@azure/msal-node");
+const { ConfidentialClientApplication } = require("@azure/msal-node");
 
 // ── Microsoft Graph helpers ──────────────────────────────────────────────────
 
@@ -36,7 +36,6 @@ async function getAccessToken() {
 
 async function graphRequest(path, method = "GET", body = null) {
   const token = await getAccessToken();
-  const { default: fetch } = await import("node-fetch");
   const res = await fetch(`${GRAPH_BASE}${path}`, {
     method,
     headers: {
@@ -49,20 +48,14 @@ async function graphRequest(path, method = "GET", body = null) {
     const err = await res.text();
     throw new Error(`Graph API error ${res.status}: ${err}`);
   }
-  if (res.status === 204) return null; // No content (e.g. DELETE)
+  if (res.status === 204) return null;
   return res.json();
 }
 
 // ── Tool implementations ─────────────────────────────────────────────────────
 
-/**
- * check_availability
- * Returns free time slots within a given date range.
- */
 async function checkAvailability({ date_from, date_to, slot_duration_minutes = 30 }) {
   const user = process.env.OUTLOOK_USER_EMAIL;
-
-  // Fetch existing events in the range
   const from = new Date(date_from).toISOString();
   const to = new Date(date_to).toISOString();
 
@@ -76,15 +69,12 @@ async function checkAvailability({ date_from, date_to, slot_duration_minutes = 3
     end: new Date(e.end.dateTime + (e.end.timeZone === "UTC" ? "Z" : "")),
   }));
 
-  // Find free slots (simple gap analysis between 08:00–18:00 each day)
   const freeSlots = [];
   const slotMs = slot_duration_minutes * 60 * 1000;
-
   let cursor = new Date(date_from);
   const rangeEnd = new Date(date_to);
 
   while (cursor < rangeEnd) {
-    // Only consider working hours: 08:00–18:00
     const dayStart = new Date(cursor);
     dayStart.setHours(8, 0, 0, 0);
     const dayEnd = new Date(cursor);
@@ -94,34 +84,21 @@ async function checkAvailability({ date_from, date_to, slot_duration_minutes = 3
 
     while (slotStart.getTime() + slotMs <= dayEnd.getTime()) {
       const slotEnd = new Date(slotStart.getTime() + slotMs);
-      const overlaps = busySlots.some(
-        (b) => slotStart < b.end && slotEnd > b.start
-      );
+      const overlaps = busySlots.some((b) => slotStart < b.end && slotEnd > b.start);
       if (!overlaps) {
-        freeSlots.push({
-          start: slotStart.toISOString(),
-          end: slotEnd.toISOString(),
-        });
+        freeSlots.push({ start: slotStart.toISOString(), end: slotEnd.toISOString() });
       }
       slotStart = new Date(slotStart.getTime() + slotMs);
     }
 
-    // Advance to next day
     cursor = new Date(cursor);
     cursor.setDate(cursor.getDate() + 1);
     cursor.setHours(0, 0, 0, 0);
   }
 
-  return {
-    free_slots: freeSlots.slice(0, 20), // cap at 20 slots
-    busy_count: busySlots.length,
-  };
+  return { free_slots: freeSlots.slice(0, 20), busy_count: busySlots.length };
 }
 
-/**
- * create_meeting
- * Creates a calendar event and optionally invites attendees.
- */
 async function createMeeting({ subject, start, end, attendees = [], body_text = "", location = "", online_meeting = false }) {
   const user = process.env.OUTLOOK_USER_EMAIL;
 
@@ -151,63 +128,41 @@ async function createMeeting({ subject, start, end, attendees = [], body_text = 
   };
 }
 
-/**
- * cancel_meeting
- * Deletes/cancels a calendar event by its ID.
- */
 async function cancelMeeting({ event_id }) {
   const user = process.env.OUTLOOK_USER_EMAIL;
   await graphRequest(`/users/${user}/events/${event_id}`, "DELETE");
   return { success: true, message: `Event ${event_id} has been cancelled.` };
 }
 
-// ── MCP Protocol handler ─────────────────────────────────────────────────────
+// ── Tool definitions ─────────────────────────────────────────────────────────
 
 const TOOLS = [
   {
     name: "check_availability",
-    description:
-      "Check the Outlook calendar for free time slots between two dates. Returns a list of available time windows.",
+    description: "Check the Outlook calendar for free time slots between two dates.",
     inputSchema: {
       type: "object",
       properties: {
-        date_from: {
-          type: "string",
-          description: "Start of the search range in ISO 8601 format, e.g. '2026-04-01T08:00:00Z'",
-        },
-        date_to: {
-          type: "string",
-          description: "End of the search range in ISO 8601 format, e.g. '2026-04-05T18:00:00Z'",
-        },
-        slot_duration_minutes: {
-          type: "number",
-          description: "Desired meeting duration in minutes. Defaults to 30.",
-        },
+        date_from: { type: "string", description: "Start of search range in ISO 8601 format, e.g. '2026-04-01T08:00:00Z'" },
+        date_to: { type: "string", description: "End of search range in ISO 8601 format, e.g. '2026-04-05T18:00:00Z'" },
+        slot_duration_minutes: { type: "number", description: "Desired meeting duration in minutes. Defaults to 30." },
       },
       required: ["date_from", "date_to"],
     },
   },
   {
     name: "create_meeting",
-    description:
-      "Create a calendar event (meeting) in Outlook. Can invite attendees and create a Teams link.",
+    description: "Create a calendar event in Outlook. Can invite attendees and create a Teams link.",
     inputSchema: {
       type: "object",
       properties: {
         subject: { type: "string", description: "Meeting title" },
         start: { type: "string", description: "Start time in ISO 8601 UTC, e.g. '2026-04-02T10:00:00Z'" },
         end: { type: "string", description: "End time in ISO 8601 UTC, e.g. '2026-04-02T10:30:00Z'" },
-        attendees: {
-          type: "array",
-          items: { type: "string" },
-          description: "List of attendee email addresses",
-        },
+        attendees: { type: "array", items: { type: "string" }, description: "List of attendee email addresses" },
         body_text: { type: "string", description: "Optional meeting description/agenda" },
         location: { type: "string", description: "Optional physical location" },
-        online_meeting: {
-          type: "boolean",
-          description: "If true, creates a Microsoft Teams meeting link",
-        },
+        online_meeting: { type: "boolean", description: "If true, creates a Microsoft Teams meeting link" },
       },
       required: ["subject", "start", "end"],
     },
@@ -218,10 +173,7 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        event_id: {
-          type: "string",
-          description: "The unique ID of the calendar event to cancel (returned by create_meeting or from the calendar)",
-        },
+        event_id: { type: "string", description: "The unique ID of the calendar event to cancel" },
       },
       required: ["event_id"],
     },
@@ -231,7 +183,6 @@ const TOOLS = [
 // ── Vercel serverless handler ────────────────────────────────────────────────
 
 module.exports = async function handler(req, res) {
-  // Simple bearer-token guard
   const authHeader = req.headers["authorization"] || "";
   const secret = process.env.MCP_SECRET;
   if (secret && authHeader !== `Bearer ${secret}`) {
@@ -249,9 +200,8 @@ module.exports = async function handler(req, res) {
     return res.status(400).json({ error: "Invalid JSON" });
   }
 
-  const { jsonrpc, id, method, params } = body;
+  const { id, method, params } = body;
 
-  // MCP JSON-RPC dispatch
   try {
     if (method === "initialize") {
       return res.json({
@@ -281,13 +231,10 @@ module.exports = async function handler(req, res) {
       return res.json({
         jsonrpc: "2.0",
         id,
-        result: {
-          content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-        },
+        result: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
       });
     }
 
-    // Fallback for unsupported methods
     return res.json({
       jsonrpc: "2.0",
       id,
