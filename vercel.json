@@ -4,11 +4,5 @@
     "api/mcp.js": {
       "maxDuration": 30
     }
-  },
-  "routes": [
-    {
-      "src": "/mcp",
-      "dest": "/api/mcp.js"
-    }
-  ]
+  }
 }
