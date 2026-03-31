@@ -13,7 +13,7 @@
  *   MCP_SECRET           – a random secret string to protect this endpoint
  */
 
-const { ConfidentialClientApplication } = require("@azure/msal-node");
+import { ConfidentialClientApplication } from "@azure/msal-node";
 
 // ── Microsoft Graph helpers ──────────────────────────────────────────────────
 
@@ -180,72 +180,85 @@ const TOOLS = [
   },
 ];
 
-// ── Vercel serverless handler ────────────────────────────────────────────────
+// ── Vercel serverless handler (Web Standard fetch export) ────────────────────
 
-module.exports = async function handler(req, res) {
-  const authHeader = req.headers["authorization"] || "";
-  const secret = process.env.MCP_SECRET;
-  if (secret && authHeader !== `Bearer ${secret}`) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
+function jsonResponse(data, status = 200) {
+  return new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8" },
+  });
+}
 
-  if (req.method !== "POST") {
-    return res.status(405).json({ error: "Method not allowed" });
-  }
+export default {
+  async fetch(request) {
+    const authHeader = request.headers.get("authorization") || "";
+    const secret = process.env.MCP_SECRET;
+    if (secret && authHeader !== `Bearer ${secret}`) {
+      return jsonResponse({ error: "Unauthorized" }, 401);
+    }
 
-  let body;
-  try {
-    body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
-  } catch {
-    return res.status(400).json({ error: "Invalid JSON" });
-  }
+    if (request.method !== "POST") {
+      return jsonResponse({ error: "Method not allowed" }, 405);
+    }
 
-  const { id, method, params } = body;
+    let body;
+    try {
+      const text = await request.text();
+      body = text ? JSON.parse(text) : {};
+    } catch {
+      return jsonResponse({ error: "Invalid JSON" }, 400);
+    }
 
-  try {
-    if (method === "initialize") {
-      return res.json({
+    const { id, method, params } = body;
+
+    try {
+      if (method === "initialize") {
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id,
+          result: {
+            protocolVersion: "2024-11-05",
+            capabilities: { tools: {} },
+            serverInfo: { name: "outlook-calendar-mcp", version: "1.0.0" },
+          },
+        });
+      }
+
+      if (method === "tools/list") {
+        return jsonResponse({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
+      }
+
+      if (method === "tools/call") {
+        const { name, arguments: args } = params;
+        let result;
+
+        if (name === "check_availability") result = await checkAvailability(args);
+        else if (name === "create_meeting") result = await createMeeting(args);
+        else if (name === "cancel_meeting") result = await cancelMeeting(args);
+        else throw new Error(`Unknown tool: ${name}`);
+
+        return jsonResponse({
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
+        });
+      }
+
+      return jsonResponse({
         jsonrpc: "2.0",
         id,
-        result: {
-          protocolVersion: "2024-11-05",
-          capabilities: { tools: {} },
-          serverInfo: { name: "outlook-calendar-mcp", version: "1.0.0" },
+        error: { code: -32601, message: "Method not found" },
+      });
+    } catch (err) {
+      console.error("MCP handler error:", err);
+      return jsonResponse(
+        {
+          jsonrpc: "2.0",
+          id,
+          error: { code: -32603, message: err.message },
         },
-      });
+        500
+      );
     }
-
-    if (method === "tools/list") {
-      return res.json({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
-    }
-
-    if (method === "tools/call") {
-      const { name, arguments: args } = params;
-      let result;
-
-      if (name === "check_availability") result = await checkAvailability(args);
-      else if (name === "create_meeting") result = await createMeeting(args);
-      else if (name === "cancel_meeting") result = await cancelMeeting(args);
-      else throw new Error(`Unknown tool: ${name}`);
-
-      return res.json({
-        jsonrpc: "2.0",
-        id,
-        result: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
-      });
-    }
-
-    return res.json({
-      jsonrpc: "2.0",
-      id,
-      error: { code: -32601, message: "Method not found" },
-    });
-  } catch (err) {
-    console.error("MCP handler error:", err);
-    return res.status(500).json({
-      jsonrpc: "2.0",
-      id,
-      error: { code: -32603, message: err.message },
-    });
-  }
+  },
 };

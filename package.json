@@ -2,6 +2,7 @@
   "name": "outlook-calendar-mcp",
   "version": "1.0.0",
   "description": "MCP server for Outlook Calendar integration via Microsoft Graph API",
+  "type": "module",
   "main": "api/mcp.js",
   "scripts": {
     "dev": "vercel dev",
