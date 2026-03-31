@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "functions": {
+    "api/mcp.js": {
+      "maxDuration": 30
+    }
+  },
+  "routes": [
+    {
+      "src": "/mcp",
+      "dest": "/api/mcp.js"
+    }
+  ]
+}
