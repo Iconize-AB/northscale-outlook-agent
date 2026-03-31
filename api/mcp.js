@@ -1,9 +1,6 @@
 /**
  * Outlook Calendar MCP Server
- * Deployed on Vercel — exposes three tools to ElevenLabs agents:
- *   1. check_availability   — find free time slots
- *   2. create_meeting        — book a calendar event
- *   3. cancel_meeting        — delete a calendar event
+ * Deployed on Vercel — Streamable HTTP (MCP spec) for clients like ElevenLabs.
  *
  * Required environment variables (set in Vercel dashboard):
  *   AZURE_TENANT_ID      – your Azure AD tenant ID
@@ -14,10 +11,13 @@
  */
 
 import { ConfidentialClientApplication } from "@azure/msal-node";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
+import * as z from "zod/v4";
 
 // ── Microsoft Graph helpers ──────────────────────────────────────────────────
 
-const GRAPH_BASE = "https://graph.microsoft.com/v1.0"; 
+const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
 
 async function getAccessToken() {
   const msalConfig = {
@@ -99,7 +99,15 @@ async function checkAvailability({ date_from, date_to, slot_duration_minutes = 3
   return { free_slots: freeSlots.slice(0, 20), busy_count: busySlots.length };
 }
 
-async function createMeeting({ subject, start, end, attendees = [], body_text = "", location = "", online_meeting = false }) {
+async function createMeeting({
+  subject,
+  start,
+  end,
+  attendees = [],
+  body_text = "",
+  location = "",
+  online_meeting = false,
+}) {
   const user = process.env.OUTLOOK_USER_EMAIL;
 
   const eventPayload = {
@@ -134,130 +142,132 @@ async function cancelMeeting({ event_id }) {
   return { success: true, message: `Event ${event_id} has been cancelled.` };
 }
 
-// ── Tool definitions ─────────────────────────────────────────────────────────
+function textResult(obj) {
+  return {
+    content: [{ type: "text", text: JSON.stringify(obj, null, 2) }],
+  };
+}
 
-const TOOLS = [
-  {
-    name: "check_availability",
-    description: "Check the Outlook calendar for free time slots between two dates.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        date_from: { type: "string", description: "Start of search range in ISO 8601 format, e.g. '2026-04-01T08:00:00Z'" },
-        date_to: { type: "string", description: "End of search range in ISO 8601 format, e.g. '2026-04-05T18:00:00Z'" },
-        slot_duration_minutes: { type: "number", description: "Desired meeting duration in minutes. Defaults to 30." },
-      },
-      required: ["date_from", "date_to"],
-    },
-  },
-  {
-    name: "create_meeting",
-    description: "Create a calendar event in Outlook. Can invite attendees and create a Teams link.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        subject: { type: "string", description: "Meeting title" },
-        start: { type: "string", description: "Start time in ISO 8601 UTC, e.g. '2026-04-02T10:00:00Z'" },
-        end: { type: "string", description: "End time in ISO 8601 UTC, e.g. '2026-04-02T10:30:00Z'" },
-        attendees: { type: "array", items: { type: "string" }, description: "List of attendee email addresses" },
-        body_text: { type: "string", description: "Optional meeting description/agenda" },
-        location: { type: "string", description: "Optional physical location" },
-        online_meeting: { type: "boolean", description: "If true, creates a Microsoft Teams meeting link" },
-      },
-      required: ["subject", "start", "end"],
-    },
-  },
-  {
-    name: "cancel_meeting",
-    description: "Cancel (delete) an existing calendar event by its event ID.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        event_id: { type: "string", description: "The unique ID of the calendar event to cancel" },
-      },
-      required: ["event_id"],
-    },
-  },
-];
+function createMcpServer() {
+  const server = new McpServer({
+    name: "outlook-calendar-mcp",
+    version: "1.0.0",
+  });
 
-// ── Vercel serverless handler (Web Standard fetch export) ────────────────────
+  server.registerTool(
+    "check_availability",
+    {
+      description: "Check the Outlook calendar for free time slots between two dates.",
+      inputSchema: {
+        date_from: z.string().describe("Start of search range in ISO 8601, e.g. 2026-04-01T08:00:00Z"),
+        date_to: z.string().describe("End of search range in ISO 8601, e.g. 2026-04-05T18:00:00Z"),
+        slot_duration_minutes: z.number().optional().default(30).describe("Meeting length in minutes"),
+      },
+    },
+    async (args) => textResult(await checkAvailability(args))
+  );
 
-function jsonResponse(data, status = 200) {
-  return new Response(JSON.stringify(data), {
-    status,
+  server.registerTool(
+    "create_meeting",
+    {
+      description: "Create a calendar event in Outlook. Can invite attendees and create a Teams link.",
+      inputSchema: {
+        subject: z.string(),
+        start: z.string().describe("Start in ISO 8601 UTC"),
+        end: z.string().describe("End in ISO 8601 UTC"),
+        attendees: z.array(z.string()).optional().default([]),
+        body_text: z.string().optional().default(""),
+        location: z.string().optional().default(""),
+        online_meeting: z.boolean().optional().default(false),
+      },
+    },
+    async (args) => textResult(await createMeeting(args))
+  );
+
+  server.registerTool(
+    "cancel_meeting",
+    {
+      description: "Cancel (delete) an existing calendar event by its event ID.",
+      inputSchema: {
+        event_id: z.string().describe("The calendar event id from Microsoft Graph"),
+      },
+    },
+    async (args) => textResult(await cancelMeeting(args))
+  );
+
+  return server;
+}
+
+/** Stateless transport — each invocation is isolated (fits Vercel serverless). */
+function createTransport() {
+  return new WebStandardStreamableHTTPServerTransport({
+    sessionIdGenerator: undefined,
+  });
+}
+
+function jsonUnauthorized() {
+  return new Response(JSON.stringify({ error: "Unauthorized" }), {
+    status: 401,
     headers: { "Content-Type": "application/json; charset=utf-8" },
   });
 }
 
+function corsResponse(response) {
+  const headers = new Headers(response.headers);
+  headers.set("Access-Control-Allow-Origin", "*");
+  headers.set(
+    "Access-Control-Expose-Headers",
+    "mcp-session-id, mcp-protocol-version, mcp-trace-id"
+  );
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+// ── Vercel serverless handler (Web Standard fetch + Streamable HTTP) ─────────
+
 export default {
   async fetch(request) {
-    const authHeader = request.headers.get("authorization") || "";
-    const secret = process.env.MCP_SECRET;
-    if (secret && authHeader !== `Bearer ${secret}`) {
-      return jsonResponse({ error: "Unauthorized" }, 401);
-    }
-
-    if (request.method !== "POST") {
-      return jsonResponse({ error: "Method not allowed" }, 405);
-    }
-
-    let body;
-    try {
-      const text = await request.text();
-      body = text ? JSON.parse(text) : {};
-    } catch {
-      return jsonResponse({ error: "Invalid JSON" }, 400);
-    }
-
-    const { id, method, params } = body;
-
-    try {
-      if (method === "initialize") {
-        return jsonResponse({
-          jsonrpc: "2.0",
-          id,
-          result: {
-            protocolVersion: "2024-11-05",
-            capabilities: { tools: {} },
-            serverInfo: { name: "outlook-calendar-mcp", version: "1.0.0" },
-          },
-        });
-      }
-
-      if (method === "tools/list") {
-        return jsonResponse({ jsonrpc: "2.0", id, result: { tools: TOOLS } });
-      }
-
-      if (method === "tools/call") {
-        const { name, arguments: args } = params;
-        let result;
-
-        if (name === "check_availability") result = await checkAvailability(args);
-        else if (name === "create_meeting") result = await createMeeting(args);
-        else if (name === "cancel_meeting") result = await cancelMeeting(args);
-        else throw new Error(`Unknown tool: ${name}`);
-
-        return jsonResponse({
-          jsonrpc: "2.0",
-          id,
-          result: { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] },
-        });
-      }
-
-      return jsonResponse({
-        jsonrpc: "2.0",
-        id,
-        error: { code: -32601, message: "Method not found" },
-      });
-    } catch (err) {
-      console.error("MCP handler error:", err);
-      return jsonResponse(
-        {
-          jsonrpc: "2.0",
-          id,
-          error: { code: -32603, message: err.message },
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+          "Access-Control-Allow-Headers":
+            "Content-Type, Authorization, mcp-session-id, mcp-protocol-version, Last-Event-ID",
+          "Access-Control-Max-Age": "86400",
         },
-        500
+      });
+    }
+
+    const secret = process.env.MCP_SECRET;
+    const authHeader = request.headers.get("authorization") || "";
+    if (secret && authHeader !== `Bearer ${secret}`) {
+      return jsonUnauthorized();
+    }
+
+    const transport = createTransport();
+    const server = createMcpServer();
+
+    try {
+      await server.connect(transport);
+      const response = await transport.handleRequest(request);
+      return corsResponse(response);
+    } catch (err) {
+      console.error("MCP Streamable HTTP error:", err);
+      return new Response(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          error: { code: -32603, message: err?.message || "Internal error" },
+          id: null,
+        }),
+        {
+          status: 500,
+          headers: { "Content-Type": "application/json; charset=utf-8" },
+        }
       );
     }
   },
