@@ -198,10 +198,40 @@ function createMcpServer() {
   return server;
 }
 
+/**
+ * The MCP SDK rejects Streamable HTTP POSTs unless Accept lists BOTH
+ * application/json and text/event-stream (spec). Many clients omit this and get 406,
+ * which surfaces as ExceptionGroup in Python/ElevenLabs. Normalize before handling.
+ */
+function normalizeRequestForMcpTransport(request) {
+  const headers = new Headers(request.headers);
+  const method = request.method;
+
+  if (method === "POST") {
+    const accept = (headers.get("accept") || "").toLowerCase();
+    if (!accept.includes("application/json") || !accept.includes("text/event-stream")) {
+      headers.set("Accept", "application/json, text/event-stream");
+      return new Request(request, { headers });
+    }
+  }
+
+  if (method === "GET") {
+    const accept = (headers.get("accept") || "").toLowerCase();
+    if (!accept.includes("text/event-stream")) {
+      headers.set("Accept", "text/event-stream");
+      return new Request(request, { headers });
+    }
+  }
+
+  return request;
+}
+
 /** Stateless transport — each invocation is isolated (fits Vercel serverless). */
 function createTransport() {
   return new WebStandardStreamableHTTPServerTransport({
     sessionIdGenerator: undefined,
+    // JSON responses avoid long-lived SSE streams (better on Vercel + picky HTTP clients).
+    enableJsonResponse: true,
   });
 }
 
@@ -254,7 +284,8 @@ export default {
 
     try {
       await server.connect(transport);
-      const response = await transport.handleRequest(request);
+      const req = normalizeRequestForMcpTransport(request);
+      const response = await transport.handleRequest(req);
       return corsResponse(response);
     } catch (err) {
       console.error("MCP Streamable HTTP error:", err);
