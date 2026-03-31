@@ -17,7 +17,7 @@ import { ConfidentialClientApplication } from "@azure/msal-node";
 
 // ── Microsoft Graph helpers ──────────────────────────────────────────────────
 
-const GRAPH_BASE = "https://graph.microsoft.com/v1.0";
+const GRAPH_BASE = "https://graph.microsoft.com/v1.0"; 
 
 async function getAccessToken() {
   const msalConfig = {
